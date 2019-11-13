@@ -20,7 +20,7 @@ from flask import request
 from flask import jsonify
 from flask import abort
 from flask import redirect
-from flask import render_template, render_template_string
+from flask import render_template
 
 
 class Handler:
@@ -30,7 +30,8 @@ class Handler:
         self._app = app
 
         self._app.add_url_rule('/', 'index', self.with_auth(self.index))
-        self._app.add_url_rule('/ui', 'ui', self.with_auth(self.ui))
+        self._app.add_url_rule('/state/', 'state', self.state, defaults={'format': 'json'}, methods=['GET'])
+        self._app.add_url_rule('/state/<format>', 'state', self.state, methods=['GET'])
 
         self._app.add_url_rule('/shutdown', 'shutdown', self.with_auth(self.shutdown), methods=['POST'])
         self._app.add_url_rule('/restart', 'restart', self.with_auth(self.restart), methods=['POST'])
@@ -64,10 +65,68 @@ class Handler:
             if not auth or not auth.username or not auth.password or not self._check_creds(auth.username, auth.password):
                 return Response('Unauthorized', 401, {'WWW-Authenticate': 'Basic realm="Unauthorized"'})
             return f(*args, **kwargs)
+
         return wrapper
 
+    def _return_json(self):
+
+        display = self._agent.view()
+
+        mesh_data = grid.call("/mesh/data")
+        mesh_peers = grid.peers()
+        messages = grid.inbox()
+
+        total_messages = len(messages)
+        unread_messages = len([m for m in messages if m['seen_at'] is None])
+
+        peers = []
+        for peer in mesh_peers:
+            peers.append({
+                "identity": peer["advertisement"]["identity"],
+                "name": peer["advertisement"]["name"],
+                "face": peer["advertisement"]["face"],
+                "pwnd_run": peer["advertisement"]["pwnd_run"],
+                "pwnd_tot": peer["advertisement"]["pwnd_tot"],
+            })
+
+        result = {
+            "identity": mesh_data["identity"],
+            "epoch": mesh_data["epoch"],
+            "status": display.get('status'),
+            "channel_text": display.get('channel'),
+            "aps_text": display.get('aps'),
+            "apt_tot": self._agent.get_total_aps(),
+            "aps_on_channel": self._agent.get_aps_on_channel(),
+            "channel": self._agent.get_current_channel(),
+            "uptime": display.get('uptime'),
+            "mode": display.get('mode'),
+            "name": mesh_data["name"],
+            "face": mesh_data["face"],
+            "num_peers": len(mesh_peers),
+            "peers": peers,
+            "total_messages": total_messages,
+            "unread_messages": unread_messages,
+            "friend_face_text": display.get('friend_face'),
+            "friend_name_text": display.get('friend_name'),
+            "pwnd_run": mesh_data["pwnd_run"],
+            "pwnd_tot": mesh_data["pwnd_tot"],
+            "version": pwnagotchi.version,
+            "memory": pwnagotchi.mem_usage(),  # Scale 0-1
+            "cpu": pwnagotchi.cpu_load(),  # Scale 0-1
+            "temperature": pwnagotchi.temperature()  # Degrees C
+        }
+
+        return jsonify(result)
+
+    def _return_png(self):
+        with web.frame_lock:
+            return send_file(web.frame_path, mimetype="image/png")
+
     def index(self):
-        return render_template('index.html',
+        theme = self._config['theme']
+        theme_page = "theme-" + theme + ".html"
+
+        return render_template(theme_page,
                                title=pwnagotchi.name(),
                                other_mode='AUTO' if self._agent.mode == 'manual' else 'MANU',
                                fingerprint=self._agent.fingerprint())
@@ -162,6 +221,15 @@ class Handler:
         grid.mark_message(id, mark)
         return redirect("/inbox")
 
+    def state(self, format):
+        if format not in ["json", "png"]:
+            return abort(415)
+
+        if format == "png":
+            return self._return_png()
+
+        return self._return_json()
+
     def plugins(self, name, subpath):
         if name is None:
             # show plugins overview
@@ -194,8 +262,3 @@ class Handler:
                                    message='Restarting in %s mode ...' % mode)
         finally:
             _thread.start_new_thread(pwnagotchi.restart, (mode,))
-
-    # serve the PNG file with the display image
-    def ui(self):
-        with web.frame_lock:
-            return send_file(web.frame_path, mimetype='image/png')
